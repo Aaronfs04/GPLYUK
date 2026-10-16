@@ -1,13 +1,24 @@
-First, install dependencies and prepare your environment:
+# GPLYUK Backend API
+
+This is the [Laravel](https://laravel.com) backend API service for the **GPLYUK** project.
+
+---
+
+## Getting Started
+
+First, install dependencies and prepare your local environment:
 
 ```bash
+# 1. Install dependencies
 composer install
 npm install
+
+# 2. Setup environment configuration
 cp .env.example .env
 php artisan key:generate
+
+# 3. Run database migrations
 php artisan migrate
-
-
 ```
 
 Then, run the development server:
@@ -18,18 +29,65 @@ composer run dev
 php artisan serve
 ```
 
-Open [http://localhost:8000](http://localhost:8000) with your browser or API client to see the result.
-You can start developing by modifying routes in `routes/web.php` or `routes/api.php`, and building controllers in `app/Http/Controllers/`.
+Open [http://localhost:8000](http://localhost:8000) with your browser or API client (Postman/Insomnia) to test the server.
+
+---
+
+## API Development (`routes/api.php`)
+
+This backend serves REST API endpoints for the frontend application:
+
+- **API Routes:** Defined in `routes/api.php`.
+- **URL Prefix:** All routes in this file are automatically prefixed with `/api` (for example: `http://localhost:8000/api/user`).
+- **Controllers:** Located in `app/Http/Controllers/`.
+- **Models:** Located in `app/Models/` (e.g. `User.php` with `HasApiTokens` for authentication).
+
+---
+
+## Team & Git Collaboration Workflow
+
+To keep the codebase clean and avoid merge conflicts, team members should follow this workflow:
+
+1. **Get the latest updates:**
+
+    ```bash
+    git checkout Staging
+    git pull origin Staging
+    ```
+
+2. **Create your own feature branch:**
+
+    ```bash
+    git checkout -b feature/nama-fitur-kamu
+    ```
+
+    _Examples:_ `feature/auth-login`, `feature/kelola-produk`, `fix/navbar-issue`.
+
+3. **Commit and push your changes:**
+
+    ```bash
+    git add .
+    git commit -m "feat: deskripsi perubahan yang dibuat"
+    git push origin feature/nama-fitur-kamu
+    ```
+
+4. **Open a Pull Request (PR):**
+    - Open a PR from your branch to `Staging` on GitHub.
+    - Wait for the automated CI tests to pass before merging.
+
+---
+
+## Continuous Integration (CI)
+
+This repository includes automated CI workflows via GitHub Actions (`.github/workflows/laravel.yml`):
+
+- Automatically triggers on push and pull requests to `main` and `Staging`.
+- Sets up PHP 8.2 and a dedicated MySQL test service container.
+- Verifies composer dependencies, runs database migrations, and executes the test suite (`php artisan test`).
+
+---
 
 ## Learn More
 
-To learn more about Laravel, take a look at the following resources:
-
-- [Laravel Documentation](https://laravel.com/docs) - learn about Laravel features and API.
-- [Laracasts](https://laracasts.com) - video tutorials on Laravel and PHP development.
-  You can check out [the Laravel GitHub repository](https://github.com/laravel/laravel) - feedback and contributions are welcome!
-
-## Deployment
-
-The easiest way to deploy your Laravel app is using platforms like [Laravel Forge](https://forge.laravel.com), [Laravel Cloud](https://cloud.laravel.com), or standard VPS/Docker environments.
-Check out the [Laravel deployment documentation](https://laravel.com/docs/deployment) for more details.
+- [Laravel Documentation](https://laravel.com/docs)
+- [Laravel Sanctum (API Tokens)](https://laravel.com/docs/sanctum)
