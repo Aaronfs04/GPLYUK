@@ -1,4 +1,4 @@
-name: Laravel CI
+name: Fullstack CI (Laravel & Inertia React)
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
     branches: ["main", "Staging", "staging"]
 
 jobs:
-  laravel-tests:
+  fullstack-tests:
     runs-on: ubuntu-latest
 
     services:
@@ -24,6 +24,7 @@ jobs:
       - name: Checkout Kode
         uses: actions/checkout@v4
 
+      # --- BACKEND ENVIRONMENT SETUP ---
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
@@ -38,14 +39,30 @@ jobs:
           key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
           restore-keys: ${{ runner.os }}-composer-
 
+      # --- FRONTEND ENVIRONMENT SETUP ---
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
       - name: Setup Environment File & Permissions
         run: |
           cp .env.example .env
           chmod -R 777 storage bootstrap/cache
 
-      - name: Install Dependencies
+      # --- INSTALL DEPENDENCIES ---
+      - name: Install Backend Dependencies (Composer)
         run: composer install -q --no-ansi --no-interaction --no-progress --prefer-dist
 
+      - name: Install Frontend Dependencies (NPM)
+        run: npm ci
+
+      # --- BUILD FRONTEND ASSETS ---
+      - name: Build Frontend Assets (Vite & React)
+        run: npm run build
+
+      # --- DATABASE & APPLICATION TESTS ---
       - name: Generate App Key
         run: php artisan key:generate
 
