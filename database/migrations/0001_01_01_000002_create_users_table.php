@@ -15,8 +15,9 @@ return new class extends Migration {
             $table->string('name');
             $table->string('email')->unique();
             $table->string('password');
-            $table->string('phone_number');
-            $table->enum('role', ['admin', 'manager', 'volunteer']);
+            $table->string('phone_number')->nullable();
+            $table->foreignId('role_id')->constrained('roles')->onDelete('restrict');
+            $table->foreignId('division_id')->nullable()->constrained('divisions')->nullOnDelete();
             $table->string('position')->nullable();
             $table->boolean('is_active')->default(true);
             $table->timestamp('email_verified_at')->nullable();

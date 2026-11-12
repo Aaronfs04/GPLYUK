@@ -20,7 +20,7 @@ return new class extends Migration {
             $table->dateTime('start_at')->index();
             $table->dateTime('end_at');
             $table->integer('quota');
-            $table->string('banner_url');
+            $table->string('banner_url')->nullable();
             $table->boolean('is_featured')->default(false);
             $table->enum('status', ['upcoming', 'ongoing', 'completed', 'cancelled'])->index();
             $table->foreignId('created_by_id')->constrained('users')->cascadeOnDelete();

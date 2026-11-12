@@ -11,15 +11,16 @@ class EventSeeder extends Seeder
 {
     public function run(): void
     {
-        // Ambil ID admin yang dibuat di UserSeeder
-        $admin = DB::table('users')->where('role', 'admin')->first();
+        $adminRole = DB::table('roles')->where('slug', 'admin')->first();
+        $admin = DB::table('users')->where('role_id', $adminRole?->id)->first();
         $adminId = $admin ? $admin->id : 1;
         $now = Carbon::now();
 
-        DB::table('events')->insert([
+        // 1. Event Dummy
+        $eventId = DB::table('events')->insertGetId([
             'title' => 'Aksi Bersih Pantai & Taman Kota',
             'slug' => Str::slug('Aksi Bersih Pantai & Taman Kota'),
-            'description' => 'Kegiatan gotong royong memilah sampah dan penghijauan ruang terbuka publik.',
+            'description' => 'Kegiatan gotong royong memilah sampah dan penghijauan ruang terbuka publik bersama komunitas GPL.',
             'location' => 'Taman Balekambang, Solo',
             'location_type' => 'physical',
             'start_at' => $now->copy()->addDays(5)->setTime(8, 0, 0),
@@ -32,5 +33,27 @@ class EventSeeder extends Seeder
             'created_at' => $now,
             'updated_at' => $now,
         ]);
+
+        // 2. Sample Registrasi & Kehadiran Volunteer
+        $volunteerRole = DB::table('roles')->where('slug', 'volunteer')->first();
+        $volunteer = DB::table('users')->where('role_id', $volunteerRole?->id)->first();
+
+        if ($volunteer && $eventId) {
+            $registrationId = DB::table('event_registrations')->insertGetId([
+                'user_id' => $volunteer->id,
+                'event_id' => $eventId,
+                'status' => 'registered',
+                'commitment_agreed' => true,
+                'notes' => 'Siap berkontribusi dan membawa kantong sampah sendiri.',
+                'created_at' => $now,
+            ]);
+
+            DB::table('attendances')->insert([
+                'registration_id' => $registrationId,
+                'recorded_by_id' => $adminId,
+                'check_in_time' => $now->copy()->addDays(5)->setTime(8, 15, 0),
+                'created_at' => $now,
+            ]);
+        }
     }
 }
