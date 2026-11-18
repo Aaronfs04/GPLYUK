@@ -17,8 +17,14 @@ class Attendance extends Model
     {
         return [
             'check_in_time' => 'datetime',
+            'revoked_at' => 'datetime',
             'created_at' => 'datetime',
         ];
+    }
+
+    public function revokedBy()
+    {
+        return $this->belongsTo(User::class, 'revoked_by_id');
     }
 
     public function registration()

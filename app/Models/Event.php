@@ -17,6 +17,8 @@ class Event extends Model
             'start_at' => 'datetime',
             'end_at' => 'datetime',
             'is_featured' => 'boolean',
+            'price' => 'decimal:2',
+            'form_schema' => 'array',
         ];
     }
 
