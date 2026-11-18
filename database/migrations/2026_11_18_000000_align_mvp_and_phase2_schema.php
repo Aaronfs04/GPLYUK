@@ -6,7 +6,7 @@ use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration {
     /**
-     * ponytail: single baseline schema alignment so RD and AS never collide on migrations.
+     * ponytail: single baseline schema alignment for MVP, Phase 2, and Phase 3 so RD and AS never collide on migrations.
      */
     public function up(): void
     {
@@ -41,6 +41,26 @@ return new class extends Migration {
             $table->string('pdf_url')->nullable()->after('cover_url');
         });
 
+        Schema::table('donations', function (Blueprint $table) {
+            $table->string('trx_code', 30)->unique()->nullable()->after('id');
+            $table->enum('type', ['donation', 'event_ticket'])->default('donation')->after('event_id');
+            $table->string('donor_email', 150)->nullable()->after('donor_name');
+            $table->string('donor_wa', 20)->nullable()->after('donor_email');
+            $table->text('admin_note')->nullable()->after('status');
+        });
+
+        Schema::table('badges', function (Blueprint $table) {
+            $table->integer('min_attendance')->default(1)->after('image_url');
+            $table->boolean('is_active')->default(true)->after('reward_points');
+        });
+
+        Schema::table('user_badges', function (Blueprint $table) {
+            $table->dropForeign(['awarded_by_id']);
+            $table->foreignId('awarded_by_id')->nullable()->change();
+            $table->foreign('awarded_by_id')->references('id')->on('users')->nullOnDelete();
+            $table->unique(['user_id', 'badge_id']);
+        });
+
         Schema::create('org_members', function (Blueprint $table) {
             $table->id();
             $table->string('name', 150);
@@ -72,6 +92,18 @@ return new class extends Migration {
     {
         Schema::dropIfExists('volunteer_applications');
         Schema::dropIfExists('org_members');
+
+        Schema::table('user_badges', function (Blueprint $table) {
+            $table->dropUnique(['user_id', 'badge_id']);
+        });
+
+        Schema::table('badges', function (Blueprint $table) {
+            $table->dropColumn(['min_attendance', 'is_active']);
+        });
+
+        Schema::table('donations', function (Blueprint $table) {
+            $table->dropColumn(['trx_code', 'type', 'donor_email', 'donor_wa', 'admin_note']);
+        });
 
         Schema::table('articles', function (Blueprint $table) {
             $table->dropColumn('pdf_url');

@@ -69,8 +69,8 @@
 - **`org_members`**: `id, name, position, division, period (e.g. '2026/2027'), photo_url, social_links (json), sort_order (int), timestamps`
 - **`articles`**: `id, title, slug, content (HTML), cover_url, pdf_url (nullable), author_id, status (draft|published), published_at, timestamps`
 - **`event_photos`**: `id, event_id, image_url, caption, sort_order, created_at`
-- **`donations`**: `id, user_id (nullable), event_id (nullable), donor_name, is_anonymous (bool), amount (decimal 12,2), message, proof_url, status (pending|verified|rejected), verified_by_id, verified_at, created_at`
-- **`badges`** & **`user_badges`**: `badges (id, name, description, icon_url, criteria_type, criteria_value)` & `user_badges (id, user_id, badge_id, awarded_at)`
+- **`donations`**: `id, trx_code (unique), user_id (nullable), event_id (nullable), type (donation|event_ticket), donor_name, donor_email, donor_wa, is_anonymous (bool), amount (decimal 12,2), message, proof_url, status (pending|verified|rejected), admin_note (nullable), verified_by_id, verified_at, created_at`
+- **`badges`** & **`user_badges`**: `badges (id, name, description, image_url, min_attendance, reward_points, is_active, created_at)` & `user_badges (id, user_id, badge_id, awarded_by_id [nullable for auto], note, awarded_at)`
 
 ---
 
@@ -259,3 +259,238 @@ Every Backend ticket is pentested immediately upon completion. Follow these **6 
    8. `Status Seleksi` (`Accepted` / `Pending` / `Rejected`)
    9. `Status Kehadiran Lapangan` (`Attended` if active attendance exists where `revoked_at IS NULL`, else `Registered`)
    10. `Waktu Check-In Presensi` (`check_in_time` formatted in WIB, or `-`)
+
+---
+
+## 8. System Design & Reference Implementation Blueprints
+
+### 8.1 Authentication & Authorization System Design (`GPL-53, 67, 96, 111`)
+
+#### A. Stateful Session Architecture (`SESSION_DRIVER=database`)
+- Uses **HTTP-Only Encrypted Session Cookies** backed by the `sessions` table in MySQL (`user_id` indexed) + automatic `XSRF-TOKEN` CSRF protection.
+- **No `localStorage` tokens:** Immune to XSS token theft and allows instant server-side session revocation (`DB::table('sessions')->where('user_id', $id)->delete()`).
+
+#### B. 4-Layer Gatekeeper Flow
+```mermaid
+flowchart TD
+    Req(["Incoming HTTP / Inertia Request"]) --> L1{"Layer 1: 'auth' & is_active Check"}
+    L1 -- "Unauthenticated" --> Login["Redirect /login"]
+    L1 -- "is_active == false" --> Kill["Auth::logout() + Invalidate Session\nRedirect /login with error"]
+    L1 -- "Active Session" --> L2{"Layer 2: 'verified'\n(MustVerifyEmail)"}
+    L2 -- "email_verified_at == null" --> VerifyGate["Hold at /verify-email\n(60s Resend Cooldown)"]
+    L2 -- "Verified" --> L3{"Layer 3: 'role:...' Middleware\n(CheckRole)"}
+    L3 -- "Role Mismatch" --> Deny403["403 Forbidden\n(or redirect pending user to /daftar-relawan)"]
+    L3 -- "Role Allowed" --> L4{"Layer 4: Division / Resource Scope\n(Anti-IDOR in Controller/Service)"}
+    L4 -- "Out of Scope" --> Abort403["abort(403)"]
+    L4 -- "Authorized" --> Controller(["Execute Controller / Service"])
+```
+
+#### C. Reference Implementation Contracts for Auth & RBAC
+1. **`App\Models\User` (`implements MustVerifyEmail` & `dashboardRoute()`):**
+   ```php
+   use Illuminate\Contracts\Auth\MustVerifyEmail;
+
+   class User extends Authenticatable implements MustVerifyEmail
+   {
+       public function dashboardRoute(): string
+       {
+           if (! $this->hasVerifiedEmail()) {
+               return route('verification.notice', absolute: false);
+           }
+
+           return match ($this->role?->slug) {
+               'admin' => route('admin.events.index', absolute: false),
+               'ketua', 'sekretaris', 'bendahara' => route('attendance.portal', absolute: false),
+               'volunteer' => route('volunteer.dashboard', absolute: false),
+               default => route('volunteer.apply', absolute: false),
+           };
+       }
+   }
+   ```
+2. **`App\Http\Middleware\CheckRole` (Register alias `'role' => CheckRole::class` in `bootstrap/app.php`):**
+   ```php
+   public function handle(Request $request, Closure $next, string ...$roles): Response
+   {
+       $user = $request->user();
+
+       if (! $user) {
+           return redirect()->route('login');
+       }
+
+       if (! $user->is_active) {
+           Auth::guard('web')->logout();
+           $request->session()->invalidate();
+           $request->session()->regenerateToken();
+           return redirect()->route('login')->withErrors(['email' => 'Akun Anda telah dinonaktifkan oleh Administrator.']);
+       }
+
+       if (! $user->hasRole($roles)) {
+           if ($user->hasRole('pending')) {
+               return redirect()->route('volunteer.apply');
+           }
+           abort(403, 'Anda tidak memiliki hak akses ke halaman ini.');
+       }
+
+       return $next($request);
+   }
+   ```
+3. **`App\Http\Middleware\HandleInertiaRequests` (Eager-load `role`, `division`, and share `flash`):**
+   ```php
+   public function share(Request $request): array
+   {
+       return [
+           ...parent::share($request),
+           'auth' => [
+               'user' => $request->user()?->loadMissing(['role:id,name,slug', 'division:id,name,slug']),
+           ],
+           'flash' => [
+               'success' => fn () => $request->session()->get('success'),
+               'error' => fn () => $request->session()->get('error'),
+           ],
+       ];
+   }
+   ```
+4. **`App\Http\Requests\Auth\LoginRequest` (Check `is_active` right after `Auth::attempt`):**
+   ```php
+   if (! Auth::user()->is_active) {
+       Auth::guard('web')->logout();
+       throw ValidationException::withMessages([
+           'email' => 'Akun Anda telah dinonaktifkan oleh Administrator.',
+       ]);
+   }
+   ```
+
+---
+
+### 8.2 Dual-Door Event Registration & Quota Concurrency Design (`GPL-105..108`)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor G as Guest (No Login)
+    actor V as Volunteer (Logged In)
+    participant S as EventRegistrationService
+    participant DB as MySQL 8 (InnoDB)
+    actor A as Admin GPL
+
+    Note over G,DB: Door 1: Guest Registration (Only on category = 'public')
+    G->>S: POST /kegiatan/{slug}/daftar (guest_name, guest_email, guest_wa, answers, commitment_agreed)
+    S->>DB: Check event is upcoming/ongoing & guest_email/guest_wa not already active
+    S->>DB: INSERT event_registrations (user_id: null, approval_status: 'pending')
+    Note right of DB: Quota is NOT deducted while 'pending'
+
+    Note over A,DB: Admin Guest Approval (Page 13)
+    A->>S: PATCH /admin/kegiatan/{event}/pendaftar/{reg}/accept
+    S->>DB: DB::transaction -> Event::where('id', $id)->lockForUpdate()->firstOrFail()
+    S->>DB: If remaining_quota <= 0 -> Rollback & Flash Error
+    S->>DB: UPDATE approval_status = 'accepted' (Deducts 1 Quota) -> Commit
+
+    Note over V,DB: Door 2: Volunteer Registration (Logged In)
+    V->>S: POST /kegiatan/{slug}/daftar (answers, commitment_agreed)
+    S->>DB: DB::transaction -> Event::where('id', $id)->lockForUpdate()->firstOrFail()
+    S->>DB: Check remaining_quota > 0 & user_id not already registered
+    S->>DB: INSERT event_registrations (user_id: auth()->id(), approval_status: 'accepted') -> Commit
+```
+
+---
+
+### 8.3 Field Attendance Portal & Auto-Badge Evaluation Design (`GPL-97, 133`)
+
+1. **Default Event Selection (`GET /portal/presensi`):**
+   - Query active event today first: `WHERE DATE(start_at) <= CURDATE() AND DATE(end_at) >= CURDATE() AND status != 'cancelled'`.
+   - If none exists today, fallback to latest completed event (`ORDER BY end_at DESC LIMIT 1`) and set `isTodayActive = false` (Read-Only History Mode).
+2. **Roster Partitioning:**
+   - **Tab 1 (`volunteerRoster`):** `event_registrations` where `user_id IS NOT NULL` and `status = 'registered'`. If `!$manager->canManageAllDivisions()`, filter `whereHas('user', fn ($q) => $q->whereIn('division_id', $manager->managedDivisions()->pluck('id')))`.
+   - **Tab 2 (`guestRoster`):** `event_registrations` where `user_id IS NULL`, `status = 'registered'`, and `approval_status = 'accepted'`.
+3. **Idempotent Toggle & Audit Trail (`POST /portal/presensi/toggle`):**
+   - Verify `isTodayActive` (`now()->toDateString()` between `start_at` and `end_at` dates in WIB); otherwise `abort(422)`.
+   - Verify division authorization if `$registration->user_id !== null` (`!$manager->canManageDivision($registration->user->division_id)` ➔ `abort(403)`).
+   - If `present === true`: `Attendance::updateOrCreate(['registration_id' => $reg->id], ['recorded_by_id' => auth()->id(), 'check_in_time' => now(), 'revoked_at' => null, 'revoked_by_id' => null])`.
+   - If `present === false`: `Attendance::where('registration_id', $reg->id)->update(['revoked_at' => now(), 'revoked_by_id' => auth()->id()])`.
+   - Return updated `{ success: true, registration_id, is_present, check_in_time, summary: { total_registered, total_attended } }`.
+
+---
+
+### 8.4 Cloudflare R2 & Local Fallback Storage Design (`GPL-70, 71, 105, 112, 129, 130`)
+
+- **Folder Structure:**
+  - **Public Disk (`public` locally / `s3` public bucket in prod):**
+    - `banners/{uuid}.{ext}` (Event posters `<= 3MB`)
+    - `org_photos/{uuid}.{ext}` (Org member photos `<= 3MB`)
+    - `articles/covers/{uuid}.{ext}` (Article covers `<= 3MB`)
+    - `articles/pdfs/{uuid}.pdf` (Article PDF papers `<= 5MB`)
+    - `galleries/{uuid}.{ext}` (Past event photos `<= 3MB`)
+    - `badges/{uuid}.{ext}` (Gamification badge icons `<= 3MB`)
+  - **Private Disk (`local` `storage/app/private` locally / `s3` private bucket in prod):**
+    - `cvs/applications/{uuid}.{ext}` (Volunteer CVs `<= 3MB`)
+    - `proofs/{uuid}.{ext}` (Donation & paid ticket transfer proofs `<= 3MB`)
+- **Pre-Signed URL Helper Pattern (`GPL-71` & `GPL-130`):**
+  ```php
+  // Inside Admin Recruitment / Transaction Controller after Policy check:
+  $disk = config('filesystems.private_disk', 'local');
+  $url = $disk === 's3'
+      ? Storage::disk('s3')->temporaryUrl($application->cv_path, now()->addMinutes(15))
+      : URL::temporarySignedRoute('admin.recruitment.cv-stream', now()->addMinutes(15), ['application' => $application->id]);
+
+  return response()->json(['url' => $url]);
+  ```
+
+---
+
+## 9. Frontend Design Tokens & Shared Layouts Contract (`GPL-74, GPL-76`)
+
+To ensure **Fawwaz (`FN`)** and **Cliff (`C`)** produce visually identical React components, all Frontend code MUST use these Tailwind tokens and layout wrappers:
+
+1. **Tailwind Color & Typography Tokens (`tailwind.config.js`):**
+   - **Primary Forest Green:** `gpl-forest` (`#1B4D3E`), `gpl-forest-dark` (`#12352B`), `gpl-forest-light` (`#2A6F58`)
+   - **Secondary / Leaf Green:** `gpl-leaf` (`#4E9F6E`), `gpl-mint` (`#E8F5E9`)
+   - **Accent Warm Gold:** `gpl-gold` (`#DDA74F`), `gpl-gold-light` (`#F5E6C8`)
+   - **Neutral Background:** `gpl-cream` (`#FAF8F5`)
+   - **Font Families:**
+     - `font-heading`: `['"Lazy Dog"', '"Fredoka"', 'cursive', 'sans-serif']` (Page titles & section headings)
+     - `font-sans`: `['"Fredoka"', '"Plus Jakarta Sans"', 'sans-serif']` (Body text, forms, tables)
+
+2. **Canonical Layout Wrappers (`resources/js/Layouts/...`):**
+   - **`Layouts/PublicLayout.jsx`:** Used by all `Public/*` pages (`Landing`, `AboutUs`, `OrgStructure`, `EventsCatalog`, `EventDetail`, `ArticlesIndex`, `ArticleDetail`, `Gallery`). Contains sticky Navbar (auto-switches `Login/Daftar Relawan` vs `Dashboard/Logout` based on `usePage().props.auth.user`) and GPL Footer.
+   - **`Layouts/DashboardLayout.jsx`:** Used by `Volunteer/*`, `Manager/*`, and `Admin/*` pages. Renders role-aware navigation items based on `auth.user.role.slug` and a global flash notification banner (`usePage().props.flash`).
+
+---
+
+## 10. Developer Ticket Ownership & Git Workflow Cheat Sheet
+
+When a developer prompts their AI assistant *"Kerjakan tiket GPL-XXX"*, follow the exact assignment and scope below:
+
+### 10.1 Backend Developers (`RD` & `AS`)
+- **Rafy Dhia (`RD` — Branch: `feature-dhia`):**
+  - `GPL-96`: Login (`is_active` check), Reset Password (60m + session kill-switch), Rate Limiting (`5/min`).
+  - `GPL-53`: Register (`628...` WA normalization, strong password, role `pending`), Email Verification Gate (60s cooldown).
+  - `GPL-67`: `CheckRole` middleware (`role:...`), `User::dashboardRoute()` role-based login redirect, `HandleInertiaRequests` shared auth/flash props.
+  - `GPL-97`: Manager Field Attendance Portal (`/portal/presensi` & `/portal/presensi/toggle`), `managedDivisions()` RBAC filter, Full-Day Hari-H WIB guard, idempotent toggle (`revoked_at`).
+  - `GPL-109`: Volunteer Dashboard data (`/dashboard/relawan` profile, event history with `display_status`, profile update).
+  - `GPL-70`: Volunteer CV Application (`GET/POST /daftar-relawan`, State A/B/C, UUID upload to private R2, re-apply on `rejected`).
+  - `GPL-71`: Admin Recruitment Decision (`/admin/rekrutmen`, 15-min Pre-Signed CV URL, atomic Approve role promotion to `volunteer`).
+  - `GPL-111`: Admin Account Management (`/admin/users`, create Manager & assign `divisions.manager_id`, toggle `is_active` + session kill-switch).
+  - `GPL-130` (Sprint 2) & `GPL-133` (Sprint 3): Admin Transaction Verification & Master Badge Auto-Evaluation.
+
+- **Aaron Faustine Suryanto (`AS` — Branch: `feature-aaron`):**
+  - `GPL-105`: Admin Event CRUD (`/admin/kegiatan`), Banner upload, max 2 `is_featured`, `form_schema` (`text, textarea, select`), cancel-instead-of-delete guard.
+  - `GPL-107`: Public Landing & Events Catalog (`/`, `/kegiatan`), `remaining_quota` (`accepted` only) & `computed_status` (WIB), search & filters.
+  - `GPL-108`: Dual-Door Event Registration (`POST /kegiatan/{event:slug}/daftar`), Guest (`pending`, no quota cut) vs Volunteer (`accepted`, cuts quota with `lockForUpdate()`).
+  - `GPL-106`: Admin Registrant Management (`/admin/kegiatan/{event}/pendaftar`), Guest Accept (with `lockForUpdate()`) / Reject, `whatsapp_url` helper.
+  - `GPL-98`: Event Report Export (`/admin/kegiatan/{event}/export?format=xlsx|csv`), 10 official columns + CSV formula injection sanitization.
+  - `GPL-68`: Dynamic Organization Structure (`/struktur-organisasi` & `/admin/cms/org-members`).
+  - `GPL-112` & `GPL-126` & `GPL-129` (Sprint 2), `GPL-135` (Sprint 3): Articles/Papers CRUD + PDF, Gallery, Donation store, Analytics/Leaderboard.
+
+### 10.2 Frontend Developers (`FN` & `C`)
+- **Fawwaz (`FN` — Branch: `feature-fawwaz`):**
+  - `GPL-74` (Design Tokens), `GPL-76` (Global Components & Layouts), `GPL-91` (Landing Page), `GPL-120` (Auth Pages 07–09), `GPL-121` (Event Detail & Dual-Door Form), `GPL-94` (Manager Attendance Portal), `GPL-122` (Volunteer CV Form State A/B/C), `GPL-123..125` (Admin Dashboard Pages), `GPL-131` (Donations FE), `GPL-136` (Admin Gamification FE).
+- **Cliff (`C` — Branch: `feature-cliff`):**
+  - `GPL-110` (Landing Featured Events), `GPL-95` (About Us), `GPL-92` (Events & Articles Catalog), `GPL-93` (Volunteer Dashboard), `GPL-118` (Article Detail & PDF Viewer), `GPL-119` (Public Org Structure), `GPL-127` (Gallery Lightbox), `GPL-134` (Volunteer Badges Tab & Notification Modal).
+
+### 10.3 Pre-PR Verification Checklist
+Before opening a Pull Request to `Staging`:
+1. Run `php artisan migrate:fresh --seed` and verify zero migration/seeder errors.
+2. Run `npm run build` and verify Vite compiles all `.jsx` pages with zero broken imports.
+3. Run `php artisan test` and verify all feature tests pass.
+
+
