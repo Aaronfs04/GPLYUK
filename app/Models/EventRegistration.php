@@ -19,6 +19,7 @@ class EventRegistration extends Model
             'created_at' => 'datetime',
             'cancelled_at' => 'datetime',
             'commitment_agreed' => 'boolean',
+            'answers' => 'array',
         ];
     }
 
